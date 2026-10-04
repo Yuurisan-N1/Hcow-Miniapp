@@ -324,39 +324,42 @@ async def play_games(session, token, proxy):
     if not games:
         log_yellow("Game catalog was not returned by the server for this account.")
         return 0
+    daily_used = int((data or {}).get("dailyUsed") or 0)
+    daily_max = int((data or {}).get("dailyMax") or 5)
     played = 0
     for game in games:
+        if daily_used + played >= daily_max:
+            break
         slug = game.get("slug")
         name = game.get("name") or slug
         if not slug or game.get("claimedToday"):
             continue
         status, launch = await api_post(session, "/api/games/launch", {"slug": slug}, token, proxy)
-        if not isinstance(launch, dict) or not launch.get("launchUrl"):
+        play_token = (launch or {}).get("token") if isinstance(launch, dict) else None
+        if not play_token:
             reason = error_text(launch)
             if reason:
                 log_yellow(f"Game {name} could not be launched because of {reason}.")
             continue
+        status, start = await api_post(session, "/api/games/report", {"token": play_token, "event": "start"}, token, proxy)
+        if not isinstance(start, dict) or not start.get("ok"):
+            reason = error_text(start)
+            if reason:
+                log_yellow(f"Game {name} session could not be started because of {reason}.")
+            continue
         wait_seconds = max(int(launch.get("minSeconds") or 30), 30) + 5
-        countdown(wait_seconds, f"Playing {name} before the reward claim")
-        claim = None
-        for attempt in range(4):
-            status, claim = await api_post(session, "/api/games/claim", {"slug": slug}, token, proxy)
-            if isinstance(claim, dict) and claim.get("ok"):
-                break
-            if isinstance(claim, dict) and claim.get("notReady") and attempt < 3:
-                countdown(15, f"Server still counts the play time of {name}")
-                continue
-            break
-        if isinstance(claim, dict) and claim.get("ok") and (claim.get("awarded") or 0) > 0:
-            awarded = claim.get("awarded")
+        countdown(wait_seconds, f"Playing {name} before the reward report")
+        status, done = await api_post(session, "/api/games/report", {"token": play_token, "event": "end", "durationSec": wait_seconds}, token, proxy)
+        awarded = int((done or {}).get("awarded") or 0) if isinstance(done, dict) else 0
+        if awarded > 0:
             played += 1
             log_green(f"Game {name} was cleared and credited {awarded} points.")
             continue
-        reason = error_text(claim) or str((claim or {}).get("reason") or "")
+        reason = ((done or {}).get("reason") if isinstance(done, dict) else "") or error_text(done)
         if reason:
-            log_yellow(f"Game {name} reward claim says: {reason}.")
+            log_yellow(f"Game {name} reward report says: {reason}.")
         else:
-            log_yellow(f"Game {name} reward claim returned no points on this run.")
+            log_yellow(f"Game {name} reward report returned no points on this run.")
     if not played:
         log_green("Every game reward was already collected for this account today.")
     return played
